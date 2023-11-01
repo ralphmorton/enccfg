@@ -1,8 +1,8 @@
 {
   "name": "enccfg",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Encrypted config management",
-  "main": "index.js",
+  "bin": "index.js",
   "scripts": {
     "prepare": "spago build && spago bundle --platform node --bundle-type app --module Main --outfile index.js"
   },

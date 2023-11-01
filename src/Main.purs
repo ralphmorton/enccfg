@@ -5,6 +5,7 @@ import Prelude
 import Control.Monad.Error.Class (throwError)
 import Data.Either (Either(..))
 import Data.Foldable (all, elem)
+import Data.Maybe (Maybe(..))
 import Data.Newtype (wrap)
 import Data.String (joinWith, singleton, split, toCodePointArray)
 import Data.Traversable (traverse)
@@ -30,6 +31,7 @@ import Options.Applicative (
   strOption,
   subparser
 )
+import Options.Applicative.Types (optional)
 
 --
 --
@@ -57,7 +59,7 @@ type InsertOpts = {
 type ReadOpts = {
   key :: String,
   inputFile :: String,
-  outputFile :: String
+  outputFile :: Maybe String
 }
 
 --
@@ -104,7 +106,7 @@ parseReadOpts :: Parser ReadOpts
 parseReadOpts = ado
   key <- strOption (long "key" <> short 'k' <> metavar "KEY" <> help "Encryption key")
   inputFile <- strOption (long "in" <> short 'i' <> metavar "INPUT_FILE" <> help "Input (encrypted) config file")
-  outputFile <- strOption (long "out" <> short 'o' <> metavar "OUTPUT_FILE" <> help "Output config file")
+  outputFile <- optional $ strOption (long "out" <> short 'o' <> metavar "OUTPUT_FILE" <> help "Output config file")
   in { key, inputFile, outputFile }
 
 --
@@ -190,9 +192,13 @@ read { key, inputFile, outputFile } = do
   inputLines <- split (wrap "\n") <$> readTextFile UTF8 inputFile
   outputLines <- traverse (map toReadOutputLine <<< decryptLine key) inputLines
   let output = joinWith "\n" outputLines
-  ensureFile outputFile
-  truncate outputFile 0
-  writeTextFile UTF8 outputFile output
+  case outputFile of
+    Nothing ->
+      log output
+    Just outputFile' -> do
+      ensureFile outputFile'
+      truncate outputFile' 0
+      writeTextFile UTF8 outputFile' output
 
 toReadOutputLine :: Either String (Tuple String String) -> String
 toReadOutputLine = case _ of
