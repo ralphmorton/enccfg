@@ -1,0 +1,23 @@
+package:
+  dependencies:
+    - console
+    - effect
+    - either
+    - foldable-traversable
+    - maybe
+    - newtype
+    - node-fs
+    - node-process
+    - optparse
+    - prelude
+    - strings
+    - transformers
+    - tuples
+  name: enccfg
+workspace:
+  extra_packages:
+    optparse:
+      git: https://github.com/ralphmorton/purescript-optparse.git
+      ref: 4a2eabbea4248b8bf68b9cdceb1a375d96d4bac6
+  package_set:
+    registry: 43.5.0
