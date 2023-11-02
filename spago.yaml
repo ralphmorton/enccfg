@@ -10,10 +10,14 @@ package:
     - node-process
     - optparse
     - prelude
+    - spec
     - strings
     - transformers
     - tuples
   name: enccfg
+  test:
+    dependencies: []
+    main: Test.Main
 workspace:
   extra_packages:
     optparse:

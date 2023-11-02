@@ -2,7 +2,9 @@ module Main where
 
 import Prelude
 
-import Control.Monad.Error.Class (throwError)
+import Control.Monad.Error.Class (throwError, try)
+import Control.Monad.Except.Trans (ExceptT, runExceptT)
+import Control.Monad.Trans.Class (lift)
 import Data.Either (Either(..))
 import Data.Foldable (all, elem)
 import Data.Maybe (Maybe(..))
@@ -12,7 +14,7 @@ import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Console (log)
-import Effect.Exception (error)
+import Effect.Exception (Error)
 import Node.Encoding (Encoding(UTF8))
 import Node.FS.Sync (appendTextFile, exists, readTextFile, truncate, writeTextFile)
 import Node.Process (exit')
@@ -62,6 +64,31 @@ type ReadOpts = {
   outputFile :: Maybe String
 }
 
+data Err
+  = KeyGenError Error
+  | NonceGenError Error
+  | InvalidValue String
+  | EncryptionError Error
+  | DecryptionError Error
+  | InvalidVariableName String
+
+instance Show Err where
+  show = case _ of
+    KeyGenError e ->
+      "KeyGenError " <> show e
+    NonceGenError e ->
+      "NonceGenError " <> show e
+    InvalidValue name ->
+      "InvalidValue " <> show name
+    EncryptionError e ->
+      "EncryptionError " <> show e
+    DecryptionError e ->
+      "DecryptionError " <> show e
+    InvalidVariableName name ->
+      "InvalidVariableName " <> show name
+
+type App = ExceptT Err Effect
+
 --
 --
 --
@@ -69,7 +96,29 @@ type ReadOpts = {
 main :: Effect Unit
 main = do
   cmd <- execParser cmdParser
-  run cmd
+  res <- runExceptT (run cmd)
+  case res of
+    Right output -> do
+      log output
+      exit' 0
+    Left e -> do
+      log (errorOutput e)
+      exit' 1
+
+errorOutput :: Err -> String
+errorOutput = case _ of
+  KeyGenError e ->
+    "Key generation failed: " <> show e
+  NonceGenError e ->
+    "Nonce generation failed: " <> show e
+  InvalidValue name ->
+    "Invalid encryped value " <> show name
+  EncryptionError e ->
+    "Encryption failed: " <> show e
+  DecryptionError e ->
+    "Decryption failed: " <> show e
+  InvalidVariableName name ->
+    "Invalid name " <> show name <> " (only uppercase characters and _ are allowed)"
 
 --
 --
@@ -113,19 +162,14 @@ parseReadOpts = ado
 --
 --
 
-run :: Command -> Effect Unit
+run :: Command -> ExceptT Err Effect String
 run = case _ of
   KeyGen ->
-    log =<< genRand_ 32
+    genKey
   Encrypt opts ->
-    log =<< encrypt opts
-  Decrypt opts -> do
-    res <- decrypt opts
-    case res of
-      Decrypted plaintext ->
-        log plaintext
-      InvalidValue ->
-        invalidValue
+    encrypt opts
+  Decrypt opts ->
+    decrypt opts
   Insert opts ->
     insert opts
   Read opts ->
@@ -138,41 +182,47 @@ invalidValue = do
 
 --
 
-encrypt :: EncryptionOpts -> Effect String
+genKey :: App String
+genKey = failWith KeyGenError (genRand_ 32)
+
+--
+
+genNonce :: App String
+genNonce = failWith NonceGenError (genRand_ 16)
+
+--
+
+encrypt :: EncryptionOpts -> App String
 encrypt { key, value } = do
-  nonce <- genRand_ 16
-  ciphertext <- encrypt_ nonce key value
+  nonce <- genNonce
+  ciphertext <- failWith EncryptionError (encrypt_ nonce key value)
   pure (nonce <> ":" <> ciphertext)
 
 foreign import encrypt_ :: String -> String -> String -> Effect String
 
 --
 
-data DecryptResult
-  = Decrypted String
-  | InvalidValue
-
-decrypt :: EncryptionOpts -> Effect DecryptResult
+decrypt :: EncryptionOpts -> App String
 decrypt { key, value: salted } = do
   case split (wrap ":") salted of
     [nonce, value] ->
-      Decrypted <$> decrypt_ nonce key value
-    _ -> do
-      pure InvalidValue
+      failWith DecryptionError (decrypt_ nonce key value)
+    _ ->
+      throwError (InvalidValue salted)
 
 foreign import decrypt_ :: String -> String -> String -> Effect String
 
 --
 
-insert :: InsertOpts -> Effect Unit
+insert :: InsertOpts -> App String
 insert { key, file, name, value } = case isValidName name of
-  false -> do
-    log "Invalid name (only uppercase characters and _ are allowed)"
-    exit' 1
+  false ->
+    throwError (InvalidVariableName name)
   true -> do
-    ensureFile file
+    lift (ensureFile file)
     ciphertext <- encrypt { key, value }
-    appendTextFile UTF8 file ("\n" <> name <> " " <> ciphertext)
+    lift $ appendTextFile UTF8 file ("\n" <> name <> " " <> ciphertext)
+    pure ""
 
 isValidName :: String -> Boolean
 isValidName = all (flip elem allowed <<< singleton) <<< toCodePointArray
@@ -187,18 +237,20 @@ isValidName = all (flip elem allowed <<< singleton) <<< toCodePointArray
 
 --
 
-read :: ReadOpts -> Effect Unit
+read :: ReadOpts -> App String
 read { key, inputFile, outputFile } = do
-  inputLines <- split (wrap "\n") <$> readTextFile UTF8 inputFile
+  inputLines <- split (wrap "\n") <$> lift (readTextFile UTF8 inputFile)
   outputLines <- traverse (map toReadOutputLine <<< decryptLine key) inputLines
   let output = joinWith "\n" outputLines
   case outputFile of
     Nothing ->
-      log output
+      pure output
     Just outputFile' -> do
-      ensureFile outputFile'
-      truncate outputFile' 0
-      writeTextFile UTF8 outputFile' output
+      lift do
+        ensureFile outputFile'
+        truncate outputFile' 0
+        writeTextFile UTF8 outputFile' output
+      pure ""
 
 toReadOutputLine :: Either String (Tuple String String) -> String
 toReadOutputLine = case _ of
@@ -209,20 +261,24 @@ toReadOutputLine = case _ of
 
 --
 
+failWith :: forall a. (Error -> Err) -> Effect a -> App a
+failWith e f = do
+  res <- lift (try f)
+  case res of
+    Left err ->
+      throwError (e err)
+    Right a ->
+      pure a
+
 ensureFile :: String -> Effect Unit
 ensureFile path = unlessM (exists path) $
   writeTextFile UTF8 path ""
 
-decryptLine :: String -> String -> Effect (Either String (Tuple String String))
+decryptLine :: String -> String -> App (Either String (Tuple String String))
 decryptLine key line = case split (wrap " ") line of
   [name, value] -> do
-    res <- decrypt { key, value }
-    case res of
-      Decrypted plaintext ->
-        pure $ pure (Tuple name plaintext)
-      InvalidValue -> do
-        invalidValue
-        throwError (error "Invalid value in file")
+    plaintext <- decrypt { key, value }
+    pure $ pure (Tuple name plaintext)
   _ ->
     pure (Left line)
 
